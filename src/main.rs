@@ -17,8 +17,9 @@ const MULTICAST_PORT: u16 = 2727;
 
 #[tokio::main]
 async fn main() -> Result<(), AppError> {
-    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    let socket = UdpSocket::bind("0.0.0.0:2727").await?;
     socket.join_multicast_v4(MULTICAST_ADDR, Ipv4Addr::UNSPECIFIED)?;
+    socket.set_multicast_loop_v4(true)?;
 
     let socket = Arc::new(socket);
     let peers = Arc::new(Mutex::new(HashSet::new()));
@@ -30,6 +31,7 @@ async fn main() -> Result<(), AppError> {
         loop {
             match listen_sock.recv_from(&mut buf).await {
                 Ok((len, addr)) => {
+                    dbg!(&buf);
                     if &buf[..len] ==  b"DISCOVER" {
                         println!("Discovered peer {}", addr);
                         listener_peers.lock().unwrap().insert(addr.ip());
@@ -44,6 +46,7 @@ async fn main() -> Result<(), AppError> {
     tokio::spawn(async move {
         let dest = SocketAddr::new(IpAddr::V4(MULTICAST_ADDR), MULTICAST_PORT);
         loop {
+            println!("send!");
             if let Err(e) = broadcast_sock.send_to(b"DISCOVER", dest).await {
                 eprintln!("Failed to send, {}", e);
             }
