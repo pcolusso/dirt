@@ -6,4 +6,5 @@ edition = "2021"
 [dependencies]
 tokio = { version = "1.4", features = ["full"] }
 thiserror = "2"
+socket2 = "0.5.8"
 
