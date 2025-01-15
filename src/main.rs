@@ -21,7 +21,7 @@ async fn main() -> Result<(), AppError> {
 
     loop {
         let peer_list = actor.get_peers().await;
-        println!("Discovered peers: {:?}", peer_list);
+        //println!("Discovered peers: {:?}", peer_list);
         sleep(Duration::from_millis(300)).await;
     }
 }

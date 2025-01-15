@@ -27,7 +27,7 @@ pub fn make_mcast(addr: &SocketAddrV4, multi: &SocketAddrV4) -> Result<std::net:
     socket.set_reuse_address(true)?; // Allow other instances on node to use same IP.
     socket.set_reuse_port(true)?; // This doesnt seem to help, either.
     socket.bind(&SockAddr::from(*addr))?;
-    socket.set_multicast_loop_v4(true)?; // Allow discovery of self, deep bro.
+    //socket.set_multicast_loop_v4(true)?; // Allow discovery of self, deep bro.
     socket.join_multicast_v4(multi.ip(), addr.ip())?;
     socket.set_nonblocking(true)?; // THIS IS VERY IMPORTANT.
 
@@ -51,11 +51,9 @@ fn mulicaster(manager: PeerManagerHandle) -> Result<(), PeerError> {
     tokio::spawn(async move {
         let mut buf = [0u8; 1024];
         loop {
-            println!("Back in the recv loop");
             match listen_sock.recv_from(&mut buf).await {
                 Ok((len, addr)) => {
                     if &buf[..len] == MESSAGE {
-                        println!("Discovered peer {}", addr);
                         manager.add_peer(addr.ip()).await;
                     }
                 },
@@ -67,11 +65,10 @@ fn mulicaster(manager: PeerManagerHandle) -> Result<(), PeerError> {
     let broadcast_sock = socket.clone();
     tokio::spawn(async move {
         loop {
-            println!("send!");
             if let Err(e) = broadcast_sock.send_to(MESSAGE, MULTICAST_ADDR).await {
                 eprintln!("Failed to send, {}", e);
             }
-            sleep(Duration::from_secs(1)).await;
+            sleep(Duration::from_secs(5)).await;
         }
     });
 
@@ -110,6 +107,7 @@ impl PeerManager {
                 match self.peers.get(&ip) {
                     Some(_state) => {},
                     None => {
+                        println!("Found a new friend, {}", &ip);
                         self.peers.insert(ip, PeerState::default());
                     }
                 }
