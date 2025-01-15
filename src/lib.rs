@@ -21,9 +21,9 @@ pub fn make_mcast(addr: &SocketAddrV4, multi: &SocketAddrV4) -> Result<std::net:
     }
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
 
-    socket.set_reuse_address(true)?;
+    socket.set_reuse_address(true)?; // Allow other instances on node to use same IP.
     socket.bind(&SockAddr::from(*addr));
-    socket.set_multicast_loop_v4(true)?;
+    socket.set_multicast_loop_v4(true)?; // Allow discovery of self, deep bro.
     socket.join_multicast_v4(multi.ip(), addr.ip())?;
 
     Ok(socket.into())

@@ -1,5 +1,5 @@
-use std::{collections::HashSet, net::{IpAddr, Ipv4Addr, SocketAddr}, sync::{Arc, Mutex}, time::Duration};
-use dirt::DirtError;
+use std::{collections::HashSet, net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4}, sync::{Arc, Mutex}, time::Duration};
+use dirt::{make_mcast, DirtError};
 use thiserror::Error;
 use tokio::{net::UdpSocket, time::sleep};
 
@@ -12,14 +12,16 @@ enum AppError {
     Io(#[from] std::io::Error),
 }
 
-const MULTICAST_ADDR: Ipv4Addr = Ipv4Addr::new(239, 27, 27, 27);
+// Multicast address space is 239/8
 const MULTICAST_PORT: u16 = 2727;
+const LISTEN_ADDR: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), MULTICAST_PORT);
+const MULTICAST_ADDR: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(239, 27, 27, 27), MULTICAST_PORT);
+const MESSAGE: &[u8; 9] = b"BABABOOEY";
 
 #[tokio::main]
 async fn main() -> Result<(), AppError> {
-    let socket = UdpSocket::bind("0.0.0.0:2727").await?;
-    socket.join_multicast_v4(MULTICAST_ADDR, Ipv4Addr::UNSPECIFIED)?;
-    socket.set_multicast_loop_v4(true)?;
+    let std_socket = make_mcast(&LISTEN_ADDR, &MULTICAST_ADDR)?;
+    let socket = UdpSocket::from_std(std_socket)?;
 
     let socket = Arc::new(socket);
     let peers = Arc::new(Mutex::new(HashSet::new()));
@@ -31,8 +33,7 @@ async fn main() -> Result<(), AppError> {
         loop {
             match listen_sock.recv_from(&mut buf).await {
                 Ok((len, addr)) => {
-                    dbg!(&buf);
-                    if &buf[..len] ==  b"DISCOVER" {
+                    if &buf[..len] == MESSAGE {
                         println!("Discovered peer {}", addr);
                         listener_peers.lock().unwrap().insert(addr.ip());
                     }
@@ -44,10 +45,9 @@ async fn main() -> Result<(), AppError> {
 
     let broadcast_sock = socket.clone();
     tokio::spawn(async move {
-        let dest = SocketAddr::new(IpAddr::V4(MULTICAST_ADDR), MULTICAST_PORT);
         loop {
             println!("send!");
-            if let Err(e) = broadcast_sock.send_to(b"DISCOVER", dest).await {
+            if let Err(e) = broadcast_sock.send_to(MESSAGE, MULTICAST_ADDR).await {
                 eprintln!("Failed to send, {}", e);
             }
             tokio::time::sleep(Duration::from_secs(5)).await;
