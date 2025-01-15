@@ -1,7 +1,7 @@
-use std::{collections::HashSet, net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4}, sync::{Arc, Mutex}, time::Duration};
-use dirt::{make_mcast, DirtError, PeerError, PeerManagerHandle};
+use std::time::Duration;
+use dirt::{DirtError, PeerError, PeerManagerHandle};
 use thiserror::Error;
-use tokio::{net::UdpSocket, time::sleep};
+use tokio::time::sleep;
 
 #[derive(Error, Debug)]
 enum AppError {
@@ -13,13 +13,15 @@ enum AppError {
     Idlk(#[from] PeerError),
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<(), AppError> {
+    //console_subscriber::init();
+
     let actor = PeerManagerHandle::new().await?;
 
     loop {
-        sleep(Duration::from_secs(5)).await;
         let peer_list = actor.get_peers().await;
         println!("Discovered peers: {:?}", peer_list);
+        sleep(Duration::from_millis(300)).await;
     }
 }

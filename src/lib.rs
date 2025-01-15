@@ -1,11 +1,7 @@
-#![allow(unused)]
-
 mod peers;
 
 pub use peers::*;
 
-use std::net::{SocketAddr, SocketAddrV4};
-use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use thiserror::Error;
 
 #[derive(Error, Debug)]

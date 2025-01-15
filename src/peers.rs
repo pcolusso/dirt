@@ -6,6 +6,7 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use thiserror::Error;
 use tokio::sync::{oneshot, mpsc};
 use tokio::net::UdpSocket;
+use tokio::time::sleep;
 
 const MULTICAST_PORT: u16 = 2727;
 const LISTEN_ADDR: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), MULTICAST_PORT);
@@ -25,9 +26,10 @@ pub fn make_mcast(addr: &SocketAddrV4, multi: &SocketAddrV4) -> Result<std::net:
 
     socket.set_reuse_address(true)?; // Allow other instances on node to use same IP.
     socket.set_reuse_port(true)?; // This doesnt seem to help, either.
-    socket.bind(&SockAddr::from(*addr));
+    socket.bind(&SockAddr::from(*addr))?;
     socket.set_multicast_loop_v4(true)?; // Allow discovery of self, deep bro.
     socket.join_multicast_v4(multi.ip(), addr.ip())?;
+    socket.set_nonblocking(true)?; // THIS IS VERY IMPORTANT.
 
     Ok(socket.into())
 }
@@ -39,10 +41,9 @@ async fn start_actor(mut actor: PeerManager) {
 }
 
 // Kicks off a listener for new peers, and a broadcaster.
-async fn mulicaster(manager: PeerManagerHandle) -> Result<(), PeerError> {
+fn mulicaster(manager: PeerManagerHandle) -> Result<(), PeerError> {
     let std_socket = make_mcast(&LISTEN_ADDR, &MULTICAST_ADDR)?;
     let socket = UdpSocket::from_std(std_socket)?;
-
     let socket = Arc::new(socket);
 
     let listen_sock = socket.clone();
@@ -50,11 +51,12 @@ async fn mulicaster(manager: PeerManagerHandle) -> Result<(), PeerError> {
     tokio::spawn(async move {
         let mut buf = [0u8; 1024];
         loop {
+            println!("Back in the recv loop");
             match listen_sock.recv_from(&mut buf).await {
                 Ok((len, addr)) => {
                     if &buf[..len] == MESSAGE {
                         println!("Discovered peer {}", addr);
-                        manager.add_peer(addr.ip());
+                        manager.add_peer(addr.ip()).await;
                     }
                 },
                 Err(e) => eprintln!("Failed to recv, {}", e)
@@ -69,7 +71,7 @@ async fn mulicaster(manager: PeerManagerHandle) -> Result<(), PeerError> {
             if let Err(e) = broadcast_sock.send_to(MESSAGE, MULTICAST_ADDR).await {
                 eprintln!("Failed to send, {}", e);
             }
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            sleep(Duration::from_secs(1)).await;
         }
     });
 
@@ -79,7 +81,7 @@ async fn mulicaster(manager: PeerManagerHandle) -> Result<(), PeerError> {
 
 #[derive(Default)]
 struct PeerState {
-    last_seen: usize,
+    _last_seen: usize,
 }
 
 struct PeerManager {
@@ -102,11 +104,11 @@ impl PeerManager {
         match msg {
             PeerMessage::GetPeers(tx) => {
                 let list = self.peers.keys().cloned().collect();
-                tx.send(list);
+                tx.send(list).expect("Huh?");
             },
             PeerMessage::NewPeer(ip) => {
                 match self.peers.get(&ip) {
-                    Some(state) => {},
+                    Some(_state) => {},
                     None => {
                         self.peers.insert(ip, PeerState::default());
                     }
@@ -128,7 +130,7 @@ impl PeerManagerHandle {
         let res = Self { sender: tx };
 
         tokio::spawn(start_actor(actor));
-        mulicaster(res.clone()).await?;
+        mulicaster(res.clone())?;
         Ok(res)
     }
 
