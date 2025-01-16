@@ -15,6 +15,22 @@ struct Payload {
     message: Message
 }
 
+impl Payload {
+    fn discover() -> Self {
+        Self {
+            header: Header { version: 0 },
+            message: Message::Discover
+        }
+    }
+
+    fn hello() -> Self {
+        Self {
+            header: Header { version: 0 },
+            message: Message::Greet
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct Header {
     version: u8
@@ -59,6 +75,26 @@ async fn start_actor(mut actor: Manager) {
     }
 }
 
+async fn handle_incoming(sock: &UdpSocket, manager: &PeerManagerHandle) -> Result<(), Box<dyn std::error::Error>> {
+    let mut buf = [0u8; 1024];
+    let (len, addr) = sock.recv_from(&mut buf).await?;
+    let payload: Payload = bincode::deserialize(&buf[..len])?;
+
+    match payload.message {
+        Message::Discover => {
+            manager.add_peer(addr.ip()).await;
+            let encoded = bincode::serialize(&Payload::hello()).unwrap();
+            sock.send_to(&encoded, addr).await?;
+        },
+        Message::Greet => {
+            manager.add_peer(addr.ip()).await;
+        },
+        Message::Check => {}
+    }
+
+    Ok(())
+}
+
 // Kicks off a listener for new peers, and a broadcaster.
 fn mulicaster(manager: PeerManagerHandle) -> Result<(), PeerError> {
     let std_socket = make_mcast(&LISTEN_ADDR, &MULTICAST_ADDR)?;
@@ -68,28 +104,19 @@ fn mulicaster(manager: PeerManagerHandle) -> Result<(), PeerError> {
     let listen_sock = socket.clone();
     // TODO: Is all this spawning an anti-pattern?
     tokio::spawn(async move {
-        let mut buf = [0u8; 1024];
         loop {
-            match listen_sock.recv_from(&mut buf).await {
-                Ok((len, addr)) => {
-                    if &buf[..len] == MESSAGE {
-                        manager.add_peer(addr.ip()).await;
-                        println!("Sending a reply.");
-                        let res = listen_sock.send_to(MESSAGE, addr).await;
-                        if let Err(e) = res {
-                            eprintln!("Failed to send reply, {}", e)
-                        }
-                    }
-                },
-                Err(e) => eprintln!("Failed to recv, {}", e)
+            if let Err(e) = handle_incoming(&listen_sock, &manager).await {
+                eprintln!("{}", e)
             }
         }
     });
 
     let broadcast_sock = socket.clone();
     tokio::spawn(async move {
+        let encoded = bincode::serialize(&Payload::discover()).unwrap();
         loop {
-            if let Err(e) = broadcast_sock.send_to(MESSAGE, MULTICAST_ADDR).await {
+
+            if let Err(e) = broadcast_sock.send_to(&encoded, MULTICAST_ADDR).await {
                 eprintln!("Failed to send, {}", e);
             }
             sleep(Duration::from_secs(5)).await;
