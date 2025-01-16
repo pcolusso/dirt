@@ -2,11 +2,30 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddrV4, Ipv4Addr};
 use std::sync::Arc;
 use std::time::Duration;
+use serde::{Deserialize, Serialize};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use thiserror::Error;
 use tokio::sync::{oneshot, mpsc};
 use tokio::net::UdpSocket;
 use tokio::time::sleep;
+
+#[derive(Serialize, Deserialize)]
+struct Payload {
+    header: Header,
+    message: Message
+}
+
+#[derive(Serialize, Deserialize)]
+struct Header {
+    version: u8
+}
+
+#[derive(Serialize, Deserialize)]
+enum Message {
+    Discover,
+    Greet,
+    Check,
+}
 
 const MULTICAST_PORT: u16 = 2727;
 const LISTEN_ADDR: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), MULTICAST_PORT);
@@ -27,14 +46,14 @@ pub fn make_mcast(addr: &SocketAddrV4, multi: &SocketAddrV4) -> Result<std::net:
     socket.set_reuse_address(true)?; // Allow other instances on node to use same IP.
     socket.set_reuse_port(true)?; // This doesnt seem to help, either.
     socket.bind(&SockAddr::from(*addr))?;
-    //socket.set_multicast_loop_v4(true)?; // Allow discovery of self, deep bro.
+    socket.set_multicast_loop_v4(true)?; // Allow discovery of self, deep bro.
     socket.join_multicast_v4(multi.ip(), addr.ip())?;
     socket.set_nonblocking(true)?; // THIS IS VERY IMPORTANT.
 
     Ok(socket.into())
 }
 
-async fn start_actor(mut actor: PeerManager) {
+async fn start_actor(mut actor: Manager) {
     while let Some(msg) = actor.receiver.recv().await {
         actor.handle(msg);
     }
@@ -55,6 +74,11 @@ fn mulicaster(manager: PeerManagerHandle) -> Result<(), PeerError> {
                 Ok((len, addr)) => {
                     if &buf[..len] == MESSAGE {
                         manager.add_peer(addr.ip()).await;
+                        println!("Sending a reply.");
+                        let res = listen_sock.send_to(MESSAGE, addr).await;
+                        if let Err(e) = res {
+                            eprintln!("Failed to send reply, {}", e)
+                        }
                     }
                 },
                 Err(e) => eprintln!("Failed to recv, {}", e)
@@ -81,29 +105,29 @@ struct PeerState {
     _last_seen: usize,
 }
 
-struct PeerManager {
-    receiver: mpsc::Receiver<PeerMessage>,
+struct Manager {
+    receiver: mpsc::Receiver<ManagerMsg>,
     peers: HashMap<IpAddr, PeerState>
 }
 
-enum PeerMessage {
+enum ManagerMsg {
     NewPeer(IpAddr),
     GetPeers(oneshot::Sender<Vec<IpAddr>>)
 }
 
-impl PeerManager {
-    fn new(receiver: mpsc::Receiver<PeerMessage>) -> Self {
+impl Manager {
+    fn new(receiver: mpsc::Receiver<ManagerMsg>) -> Self {
         let peers = HashMap::new();
         Self { receiver, peers }
     }
 
-    fn handle(&mut self, msg: PeerMessage) {
+    fn handle(&mut self, msg: ManagerMsg) {
         match msg {
-            PeerMessage::GetPeers(tx) => {
+            ManagerMsg::GetPeers(tx) => {
                 let list = self.peers.keys().cloned().collect();
                 tx.send(list).expect("Huh?");
             },
-            PeerMessage::NewPeer(ip) => {
+            ManagerMsg::NewPeer(ip) => {
                 match self.peers.get(&ip) {
                     Some(_state) => {},
                     None => {
@@ -118,13 +142,13 @@ impl PeerManager {
 
 #[derive(Clone)]
 pub struct PeerManagerHandle {
-    sender: mpsc::Sender<PeerMessage>
+    sender: mpsc::Sender<ManagerMsg>
 }
 
 impl PeerManagerHandle {
     pub async fn new() -> Result<Self, PeerError> {
         let (tx, rx) = mpsc::channel(8);
-        let actor = PeerManager::new(rx);
+        let actor = Manager::new(rx);
         let res = Self { sender: tx };
 
         tokio::spawn(start_actor(actor));
@@ -134,13 +158,13 @@ impl PeerManagerHandle {
 
     pub async fn get_peers(&self) -> Vec<IpAddr> {
         let (tx, rx) = oneshot::channel();
-        let msg = PeerMessage::GetPeers(tx);
+        let msg = ManagerMsg::GetPeers(tx);
         let _ = self.sender.send(msg).await;
         rx.await.expect("actor is kill")
     }
 
     async fn add_peer(&self, ip: IpAddr) {
-        let msg = PeerMessage::NewPeer(ip);
+        let msg = ManagerMsg::NewPeer(ip);
         self.sender.send(msg).await.expect("actor is kill")
     }
 }
