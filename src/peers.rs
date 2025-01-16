@@ -1,13 +1,18 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddrV4, Ipv4Addr};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use thiserror::Error;
 use tokio::sync::{oneshot, mpsc};
 use tokio::net::UdpSocket;
-use tokio::time::sleep;
+use tokio::time::{sleep, Interval};
+
+const MULTICAST_PORT: u16 = 2727;
+const LISTEN_ADDR: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), MULTICAST_PORT);
+const MULTICAST_ADDR: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(239, 27, 27, 27), MULTICAST_PORT);
+const API_VERSION: u8 = 0;
 
 #[derive(Serialize, Deserialize)]
 struct Payload {
@@ -16,18 +21,8 @@ struct Payload {
 }
 
 impl Payload {
-    fn discover() -> Self {
-        Self {
-            header: Header { version: 0 },
-            message: Message::Discover
-        }
-    }
-
-    fn hello() -> Self {
-        Self {
-            header: Header { version: 0 },
-            message: Message::Greet
-        }
+    fn make(message: Message) -> Self {
+        Self { header: Header::default(), message }
     }
 }
 
@@ -36,17 +31,19 @@ struct Header {
     version: u8
 }
 
-#[derive(Serialize, Deserialize)]
-enum Message {
-    Discover,
-    Greet,
-    Check,
+impl Default for Header {
+    fn default() -> Self {
+        Header { version: API_VERSION }
+    }
 }
 
-const MULTICAST_PORT: u16 = 2727;
-const LISTEN_ADDR: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), MULTICAST_PORT);
-const MULTICAST_ADDR: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(239, 27, 27, 27), MULTICAST_PORT);
-const MESSAGE: &[u8; 9] = b"BABABOOEY";
+#[derive(Serialize, Deserialize)]
+enum Message {
+    Discover, // Sent out via multicast, to discover peers.
+    Greet, // Reply from discover.
+    Ping, // Check if peer still alive
+    Pong, // Reply, indicating alive.
+}
 
 #[derive(Debug, Error)]
 pub enum PeerError {
@@ -70,8 +67,18 @@ pub fn make_mcast(addr: &SocketAddrV4, multi: &SocketAddrV4) -> Result<std::net:
 }
 
 async fn start_actor(mut actor: Manager) {
-    while let Some(msg) = actor.receiver.recv().await {
-        actor.handle(msg);
+    let mut timer = tokio::time::interval(Duration::from_secs(10));
+
+    loop {
+        tokio::select! {
+            msg = actor.receiver.recv() => match msg {
+                Some(msg) => actor.handle(msg),
+                None => {}
+            },
+            _ = timer.tick() => {
+                actor.heartbeat()
+            }
+        }
     }
 }
 
@@ -83,13 +90,20 @@ async fn handle_incoming(sock: &UdpSocket, manager: &PeerManagerHandle) -> Resul
     match payload.message {
         Message::Discover => {
             manager.add_peer(addr.ip()).await;
-            let encoded = bincode::serialize(&Payload::hello()).unwrap();
+            let encoded = bincode::serialize(&Payload::make(Message::Greet)).unwrap();
             sock.send_to(&encoded, addr).await?;
         },
         Message::Greet => {
             manager.add_peer(addr.ip()).await;
         },
-        Message::Check => {}
+        Message::Ping => {
+            let encoded = bincode::serialize(&Payload::make(Message::Pong)).unwrap();
+            manager.add_peer(addr.ip()).await; // We can mutually assume it's healthy as well.
+            sock.send_to(&encoded, addr).await?;
+        },
+        Message::Pong => {
+            manager.add_peer(addr.ip()).await;
+        }
     }
 
     Ok(())
@@ -113,9 +127,8 @@ fn mulicaster(manager: PeerManagerHandle) -> Result<(), PeerError> {
 
     let broadcast_sock = socket.clone();
     tokio::spawn(async move {
-        let encoded = bincode::serialize(&Payload::discover()).unwrap();
+        let encoded = bincode::serialize(&Payload::make(Message::Discover)).unwrap();
         loop {
-
             if let Err(e) = broadcast_sock.send_to(&encoded, MULTICAST_ADDR).await {
                 eprintln!("Failed to send, {}", e);
             }
@@ -123,13 +136,18 @@ fn mulicaster(manager: PeerManagerHandle) -> Result<(), PeerError> {
         }
     });
 
-
     Ok(())
 }
 
-#[derive(Default)]
+#[derive(Debug)]
 struct PeerState {
-    _last_seen: usize,
+    last_seen: SystemTime,
+}
+
+impl Default for PeerState {
+    fn default() -> Self {
+        Self { last_seen: SystemTime::now() }
+    }
 }
 
 struct Manager {
@@ -138,8 +156,8 @@ struct Manager {
 }
 
 enum ManagerMsg {
-    NewPeer(IpAddr),
-    GetPeers(oneshot::Sender<Vec<IpAddr>>)
+    FoundPeer(IpAddr),
+    GetPeers(oneshot::Sender<Vec<IpAddr>>),
 }
 
 impl Manager {
@@ -154,16 +172,31 @@ impl Manager {
                 let list = self.peers.keys().cloned().collect();
                 tx.send(list).expect("Huh?");
             },
-            ManagerMsg::NewPeer(ip) => {
-                match self.peers.get(&ip) {
-                    Some(_state) => {},
+            ManagerMsg::FoundPeer(ip) => {
+                match self.peers.get_mut(&ip) {
+                    Some(state) => {
+                        state.last_seen = SystemTime::now();
+                    },
                     None => {
                         println!("Found a new friend, {}", &ip);
                         self.peers.insert(ip, PeerState::default());
                     }
                 }
-            }
+            },
         }
+    }
+
+    fn heartbeat(&mut self) {
+        self.peers.retain(|&_addr, state| {
+            match state.last_seen.elapsed() {
+                Ok(elapsed) if elapsed > Duration::from_secs(60) => false,
+                Ok(_) => true,
+                Err(_) => false,
+            }
+        });
+
+        println!("HB");
+        dbg!(&self.peers.keys());
     }
 }
 
@@ -191,7 +224,7 @@ impl PeerManagerHandle {
     }
 
     async fn add_peer(&self, ip: IpAddr) {
-        let msg = ManagerMsg::NewPeer(ip);
+        let msg = ManagerMsg::FoundPeer(ip);
         self.sender.send(msg).await.expect("actor is kill")
     }
 }
