@@ -1,4 +1,6 @@
-use dirt::{storage::{Store, StoreHandle}, PeerError, PeerManagerHandle};
+use std::time::Duration;
+
+use dirt::{storage::{Store, StoreHandle}, sync::SyncHandle, PeerError, PeerManagerHandle};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -14,10 +16,11 @@ async fn main() -> Result<(), AppError> {
     //console_subscriber::init();
 
     let actor = PeerManagerHandle::new().await?;
-    let store = StoreHandle::new();
-    dirt::sync::run().await.unwrap();
+    let store = StoreHandle::new().await;
+    let sync = SyncHandle::new(actor, store).await;
 
-
-    Ok(())
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
 
 }

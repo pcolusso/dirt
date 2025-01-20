@@ -1,9 +1,9 @@
+use std::error::Error;
+use tokio::sync::mpsc;
 use raft::{default_logger, prelude::*};
-use std::time::Duration;
+use crate::{storage::StoreHandle, PeerManagerHandle};
 
-use crate::storage::Store;
-
-impl Storage for Store {
+impl Storage for StoreHandle {
     fn initial_state(&self) -> Result<RaftState, raft::Error> {
         Ok(RaftState::new(HardState::default(), ConfState::default()))
     }
@@ -35,35 +35,66 @@ impl Storage for Store {
     }
 }
 
-pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let mut store = Store::default();
-    let config = Config {
-        id: 1,
-        election_tick: 10,
-        heartbeat_tick: 3,
-        ..Default::default()
-    };
-    config.validate()?;
-    let logger = default_logger();
+enum SyncMessage {
 
-    let mut raft = RawNode::new(&config, store.clone(), &logger)?;
+}
 
-    tokio::spawn(async move {
-        loop {
-            raft.tick();
-            tokio::time::sleep(Duration::from_millis(100)).await;
+struct SyncActor {
+    peers: PeerManagerHandle,
+    raft: RawNode<StoreHandle>,
+    receiver: mpsc::Receiver<SyncMessage>
+}
+
+impl SyncActor {
+
+    fn handle(&mut self, msg: SyncMessage) {
+        match msg {
+            _ => unimplemented!()
         }
-    });
+    }
 
-    store.put("key1".to_string(), "value1".to_string()).await;
-    store.put("key2".to_string(), "value2".to_string()).await;
+    fn heartbeat(&mut self) {
+        self.raft.tick();
+    }
+}
 
-    // Print the stored values
-    println!("key1: {:?}", store.get("key1").await);
-    println!("key2: {:?}", store.get("key2").await);
+#[derive(Clone)]
+pub struct SyncHandle {
+    sender: mpsc::Sender<SyncMessage>
+}
 
-    // Keep the main thread running
+async fn run(mut actor: SyncActor) {
+    let mut timer = tokio::time::interval(std::time::Duration::from_secs(10));
+
     loop {
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::select! {
+            msg = actor.receiver.recv() => match msg {
+                Some(msg) => actor.handle(msg),
+                None => {}
+            },
+            _ = timer.tick() => {
+                actor.heartbeat()
+            }
+        }
+    }
+}
+
+impl SyncHandle {
+    pub async fn new(peers: PeerManagerHandle, store: StoreHandle) -> Result<Self, Box<dyn Error>> {
+        let config = Config {
+            id: 1, election_tick: 10, heartbeat_tick: 3, ..Default::default()
+        };
+        config.validate()?;
+        let logger = default_logger();
+        let raft = RawNode::new(&config, store.clone(), &logger)?;
+
+        let (tx, rx) = mpsc::channel(8);
+        let actor = SyncActor {
+            peers, raft, receiver: rx
+        };
+        let res = Self { sender: tx };
+        tokio::spawn(run(actor));
+
+        Ok(res)
     }
 }
