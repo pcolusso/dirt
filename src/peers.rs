@@ -7,7 +7,7 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use thiserror::Error;
 use tokio::sync::{oneshot, mpsc};
 use tokio::net::UdpSocket;
-use tokio::time::{sleep, Interval};
+use tokio::time::sleep;
 
 const MULTICAST_PORT: u16 = 2727;
 const LISTEN_ADDR: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), MULTICAST_PORT);
@@ -194,6 +194,9 @@ impl Manager {
                 Err(_) => false,
             }
         });
+
+        // The refreshes should take place with the repeated discover calls.
+        // Otherwise, we may need to dispatch healthchecks to lost nodes.
 
         println!("HB");
         dbg!(&self.peers.keys());

@@ -1,12 +1,8 @@
-use std::time::Duration;
-use dirt::{DirtError, PeerError, PeerManagerHandle};
+use dirt::{storage::{Store, StoreHandle}, PeerError, PeerManagerHandle};
 use thiserror::Error;
-use tokio::time::sleep;
 
 #[derive(Error, Debug)]
 enum AppError {
-    #[error("App error; ")]
-    Core(#[from] DirtError),
     #[error("I/O error")]
     Io(#[from] std::io::Error),
     #[error("adsf")]
@@ -18,10 +14,10 @@ async fn main() -> Result<(), AppError> {
     //console_subscriber::init();
 
     let actor = PeerManagerHandle::new().await?;
+    let store = StoreHandle::new();
+    dirt::sync::run().await.unwrap();
 
-    loop {
-        let peer_list = actor.get_peers().await;
-        //println!("Discovered peers: {:?}", peer_list);
-        sleep(Duration::from_millis(300)).await;
-    }
+
+    Ok(())
+
 }
